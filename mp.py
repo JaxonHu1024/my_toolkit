@@ -17,11 +17,11 @@ multi_process
 
 from __future__ import annotations
 
-import gc
 import os
 from typing import (
     Any,
     Callable,
+    Dict,
     Iterable,
     Iterator,
     List,
@@ -201,21 +201,23 @@ def apply_parallel(
 
     # ---- 2. 物化可迭代对象 -----------------------------------------------
     items, inferred_total = _resolve_iterable(iterable)
-    total_num = total_num or inferred_total
+    # total_num 仅用于进度条显示，真实任务数以 items 长度为准
+    actual_total = inferred_total
+    display_total = total_num if total_num is not None else inferred_total
 
     # 边界: 空任务直接返回
-    if total_num == 0:
+    if actual_total == 0:
         return []
 
     # 裁剪 num_workers 到合理范围
-    num_workers = max(1, min(num_workers, total_num))
+    num_workers = max(1, min(num_workers, actual_total))
 
     # ---- 3. 决定是否分批提交 ---------------------------------------------
     if batch_size is None:
         # 超过 10000 条自动启用分批，防止 Future 过多占满内存
-        effective_batch = _DEFAULT_BATCH_SIZE if total_num > 10000 else total_num
+        effective_batch = _DEFAULT_BATCH_SIZE if actual_total > 10000 else actual_total
     elif batch_size <= 0:
-        effective_batch = total_num  # 禁用分批
+        effective_batch = actual_total  # 禁用分批
     else:
         effective_batch = batch_size
 
@@ -232,11 +234,11 @@ def apply_parallel(
 
     logger.info(
         f"apply_parallel 启动 | method={method}, workers={num_workers}, "
-        f"total={total_num}, batch={effective_batch}, error_policy={error_policy}",
+        f"total={actual_total}, batch={effective_batch}, error_policy={error_policy}",
     )
 
     # ---- 6. 提交与收集 ---------------------------------------------------
-    results: list = [None] * total_num
+    results: list = [None] * actual_total
     error_count = 0
     completed_count = 0
     should_abort = False  # raise 策略下的中止标志
@@ -244,19 +246,20 @@ def apply_parallel(
     pbar = None
     if use_tqdm:
         pbar = tqdm(
-            total=total_num,
+            total=display_total,
             desc=progress_desc,
             dynamic_ncols=True,
         )
 
     try:
-        with executor_cls(max_workers=num_workers) as executor:
+        executor = executor_cls(max_workers=num_workers)
+        try:
             for chunk, chunk_start in _chunked(items, effective_batch):
                 if should_abort:
                     break
 
                 # 提交当前批次
-                future_to_idx: dict[Future, int] = {}
+                future_to_idx: Dict[Future, int] = {}
                 for local_idx, elem in enumerate(chunk):
                     global_idx = chunk_start + local_idx
                     fut = executor.submit(_call_func, func, elem)
@@ -269,7 +272,6 @@ def apply_parallel(
                         results[idx] = future.result()
                     except Exception as exc:
                         error_count += 1
-                        logger.error(f"任务 #{idx} 执行失败: {exc}")
 
                         if error_policy == "raise":
                             should_abort = True
@@ -279,17 +281,28 @@ def apply_parallel(
                             raise RuntimeError(
                                 f"任务 #{idx} 执行失败: {exc}"
                             ) from exc
-                        elif error_policy == "store":
-                            results[idx] = exc
-                        # "ignore" → results[idx] 保持 None
+                        else:
+                            logger.error(f"任务 #{idx} 执行失败: {exc}")
+                            if error_policy == "store":
+                                results[idx] = exc
+                            # "ignore" → results[idx] 保持 None
 
                     completed_count += 1
                     if pbar is not None:
                         pbar.update(1)
 
-                # 批次间释放 Future 引用，允许 GC 回收
+                # 批次间释放 Future 引用
                 del future_to_idx
-                gc.collect()
+        finally:
+            # raise 策略下立即取消尚未开始的任务，避免等待长任务
+            if should_abort:
+                try:
+                    executor.shutdown(wait=False, cancel_futures=True)
+                except TypeError:
+                    # Python < 3.9 不支持 cancel_futures
+                    executor.shutdown(wait=False)
+            else:
+                executor.shutdown(wait=True)
 
     finally:
         if pbar is not None:
@@ -297,8 +310,8 @@ def apply_parallel(
 
     # ---- 7. 日志汇总 -----------------------------------------------------
     if error_count:
-        logger.warning(f"共有 {error_count} / {total_num} 个任务执行失败")
+        logger.warning(f"共有 {error_count} / {actual_total} 个任务执行失败")
     else:
-        logger.info(f"全部 {total_num} 个任务执行完成")
+        logger.info(f"全部 {actual_total} 个任务执行完成")
 
     return results

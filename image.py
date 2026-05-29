@@ -39,14 +39,21 @@ from typing import Optional, Union
 
 import requests
 
-import pillow_heif
-
-pillow_heif.register_heif_opener()
-
 from PIL import Image, ExifTags
 
 from .logger import init_logger
 logger = init_logger(name=__name__)
+
+try:
+    import pillow_heif
+except ImportError:
+    pillow_heif = None
+    logger.warning(
+        "pillow_heif 未安装，HEIF/HEIC 读写能力将不可用。"
+        "如需支持请安装: pip install pillow_heif"
+    )
+else:
+    pillow_heif.register_heif_opener()
 
 # ---------------------------------------------------------------------------
 # 常量与辅助
@@ -276,7 +283,7 @@ def _strip_data_url_prefix(b64_string: str) -> tuple[Optional[str], str]:
     return None, b64_string
 
 def readable_bytes_size(size_bytes: int) -> str:
-    """将字节数转换为人类可读的格式（KB、MB、GB）。"""
+    """将字节数转换为人类可读的格式（KB、MB）。"""
     # 可读大小
     if size_bytes < 1024:
         readable = f"{size_bytes} B"
@@ -331,6 +338,8 @@ def download_bytes_from_url(
         chunks: list[bytes] = []
         downloaded = 0
         for chunk in response.iter_content(chunk_size=8192):
+            if not chunk:
+                continue
             downloaded += len(chunk)
             if downloaded > max_size:
                 raise ImageDownloadError(
@@ -377,7 +386,7 @@ def bytes_to_img(data: bytes) -> Image.Image:
         img.load()  # 确保像素数据完全读入内存，防止 buf 被 GC 后读取失败
         return img
     except Exception as exc:
-        raise ImageFormatError("无法解析图像数据: %s", exc) from exc
+        raise ImageFormatError(f"无法解析图像数据: {exc}") from exc
 
 
 def img_to_bytes(img: Image.Image, fmt: Optional[str] = None) -> bytes:
@@ -586,8 +595,6 @@ class MyImage:
         self._base64: Optional[str] = None # 始终存储 *纯* base64 字符串（不含 data URL 前缀）
         self._format: Optional[str] = None
 
-        fmt: Optional[str] = None
-
         # ------ 根据来源进行加载 ------
         if path is not None:
             path = Path(path)
@@ -595,35 +602,26 @@ class MyImage:
                 raise FileNotFoundError(f"文件不存在: {path}")
             self._img = Image.open(path)
             self._img.load()  # 读入内存，释放文件句柄
-            fmt = _guess_format_from_suffix(str(path))
 
         elif url is not None:
             raw_bytes = download_bytes_from_url(url)
-            self._bytes = raw_bytes
             self._img = bytes_to_img(raw_bytes)
-            fmt = _guess_format_from_suffix(url)
 
         elif byte is not None:
-            self._bytes = byte
             self._img = bytes_to_img(byte)
-            fmt = _guess_format_from_bytes(byte)
 
         elif base64 is not None:
-            # 分离 data URL 前缀，仅缓存纯 base64
-            prefix_fmt, pure_b64 = _strip_data_url_prefix(base64)
-            self._base64 = pure_b64
             raw_bytes = base64_to_bytes(base64)
-            self._bytes = raw_bytes
             self._img = bytes_to_img(raw_bytes)
-            fmt = prefix_fmt or _guess_format_from_bytes(raw_bytes)
-
 
         elif img is not None:
             self._img = img
-            fmt = _normalize_format(img.format)
 
-        # ------ 格式兜底 ------
-        self._format = _normalize_format(fmt or self._img.format or _DEFAULT_FORMAT)
+        # ------ 统一为 RGB 格式的 JPEG 作为标准格式 ------
+        self._img = _ensure_rgb_for_jpeg(self._img)
+        if self._img.mode != "RGB":
+            self._img = self._img.convert("RGB")
+        self._format = _DEFAULT_FORMAT
 
     # ---- 便捷属性 ----
 
@@ -730,7 +728,7 @@ class MyImage:
 
         # 优先从路径后缀推断格式
         if fmt is None:
-            fmt = self._format or _guess_format_from_suffix(str(path))
+            fmt = _guess_format_from_suffix(str(path)) or self._format
         else:
             fmt = _normalize_format(fmt) or self._format
 

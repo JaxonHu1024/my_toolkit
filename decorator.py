@@ -2,8 +2,6 @@ import asyncio
 import inspect
 import random
 import time
-import traceback
-from contextlib import contextmanager
 from functools import wraps
 from typing import Any, Callable, Optional, Tuple, Type, TypeVar, Union
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
@@ -44,14 +42,13 @@ class timer:
     """
 
     def __new__(cls, func_or_label: Union[Callable[P, R], str, None] = None):
+        instance = super().__new__(cls)
+
         # @timer  —— 直接装饰（无括号）
         if callable(func_or_label):
-            instance = super().__new__(cls)
-            instance._label = func_or_label.__name__
             return instance._wrap(func_or_label)
 
         # timer("label") —— 上下文管理器
-        instance = super().__new__(cls)
         instance._label = func_or_label or "block"
         return instance
 
@@ -130,18 +127,23 @@ def timeout(seconds: float) -> Callable[[Callable[P, R]], Callable[P, R]]:
 
         @wraps(func)
         def sync_wrapper(*args: P.args, **kwargs: P.kwargs) -> R:
-            with ThreadPoolExecutor(
+            # 不使用 `with ThreadPoolExecutor(...)`，避免 __exit__ 中
+            # shutdown(wait=True) 在超时后仍阻塞等待子线程结束。
+            executor = ThreadPoolExecutor(
                 max_workers=1,
                 thread_name_prefix=f"timeout-{func.__name__}",
-            ) as executor:
+            )
+            try:
                 future = executor.submit(func, *args, **kwargs)
                 try:
                     return future.result(timeout=seconds)
                 except FutureTimeoutError:
-                    future.cancel()
                     raise TimeoutError(
                         "Function '%s' timed out after %ss" % (func.__name__, seconds)
                     ) from None
+            finally:
+                # 不等待子线程：线程本身无法被强制终止，但主线程立即返回。
+                executor.shutdown(wait=False)
 
         return sync_wrapper  # type: ignore[return-value]
 
@@ -182,18 +184,20 @@ def retry(
 
         def _compute_sleep(attempt: int) -> float:
             base = delay * (backoff ** (attempt - 1))
-            return base + random.uniform(0, jitter) if jitter > 0 else base
+            return (base + random.uniform(0, jitter)) if jitter > 0 else base
 
         def _log_retry(attempt: int, exc: BaseException, sleep_time: float):
             logger.debug(
-                f"[retry] '{func.__name__}' attempt {attempt}/{max_attempts} failed: {exc}; retrying in {sleep_time} …",
+                f"[retry] '{func.__name__}' attempt {attempt}/{max_attempts} failed: {exc}; "
+                f"retrying in {sleep_time:.3f}s …",
             )
 
         def _log_exhausted(last_exc: BaseException):
             logger.error(
                 f"[retry] '{func.__name__}' exhausted {max_attempts} attempts. Last error: {last_exc}",
             )
-            logger.error("[retry] traceback:\n%s", traceback.format_exc())
+            # 使用 exc_info=True，自动记录当前异常栈，避免手写 traceback.format_exc
+            logger.error("[retry] traceback:", exc_info=True)
 
         # ── 异步版本 ──
         if inspect.iscoroutinefunction(func):
