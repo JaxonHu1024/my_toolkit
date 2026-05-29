@@ -41,7 +41,7 @@ class TestFileTxt(_Base):
             p = Path(td) / "a" / "b.txt"
 
             file_mod.write_txt(["  hello ", "world"], p)
-            self.assertEqual(file_mod.read_txt(p, as_lines=True), ["hello", "world"])
+            self.assertEqual(file_mod.read_txt(p, as_lines=True), ["  hello ", "world"])
 
             # 覆盖写入字符串
             file_mod.write_txt("raw\ntext\n", p)

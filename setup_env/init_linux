@@ -3,9 +3,7 @@ git config --global user.name "username"
 git config --global user.email "username@email.com"
 
 # apt安装
-sudo apt install htop
-sudo apt install psmisc
-sudo apt install iputils-ping
+sudo apt install htop psmisc iputils-ping npm ripgrep bat tree jq
 
 # 安装conda
 wget "https://github.com/conda-forge/miniforge/releases/latest/download/Miniforge3-$(uname)-$(uname -m).sh"
