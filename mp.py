@@ -27,6 +27,7 @@ from typing import (
     List,
     Literal,
     Optional,
+    Sequence,
 )
 from concurrent.futures import (
     ThreadPoolExecutor,
@@ -94,8 +95,8 @@ def _call_func(func: Callable, element: Any) -> Any:
     return func(element)
 
 
-def _resolve_iterable(iterable: Any) -> tuple[list, int]:
-    """将各种可迭代类型统一转为 list，并在遇到 DataFrame 时转为 records。
+def _resolve_iterable(iterable: Any) -> tuple[Sequence[Any], int]:
+    """将各种可迭代类型统一为可切片序列，并在遇到 DataFrame 时转为 records。
 
     Returns
     -------
@@ -106,14 +107,18 @@ def _resolve_iterable(iterable: Any) -> tuple[list, int]:
         items = iterable.to_dict(orient="records")
         return items, len(items)
 
-    if isinstance(iterable, (list, tuple)):
+    if isinstance(iterable, (list, tuple, range)):
         return iterable, len(iterable)
 
-    # 有 __len__ 和 __iter__ 的类序列对象（如 ndarray、range 等）
-    if hasattr(iterable, "__len__") and hasattr(iterable, "__iter__"):
+    # 有 __len__ / __iter__ / __getitem__ 的类序列对象（如 ndarray 等）
+    if (
+        hasattr(iterable, "__len__")
+        and hasattr(iterable, "__iter__")
+        and hasattr(iterable, "__getitem__")
+    ):
         return iterable, len(iterable)
 
-    # 生成器 / 纯迭代器 — 必须物化
+    # 生成器 / 纯迭代器 / set 等非稳定可切片对象 — 必须物化
     logger.warning(
         f"iterable type is {type(iterable).__name__}, materializing to list..."
     )
@@ -125,7 +130,7 @@ def _resolve_iterable(iterable: Any) -> tuple[list, int]:
     return items, len(items)
 
 
-def _chunked(seq: Any, size: int) -> Iterator[tuple[list, int]]:
+def _chunked(seq: Sequence[Any], size: int) -> Iterator[tuple[Sequence[Any], int]]:
     """将序列按 size 分批 yield，避免一次性生成所有 Future。"""
     for start in range(0, len(seq), size):
         yield seq[start: start + size], start
@@ -198,6 +203,14 @@ def apply_parallel(
         raise ValueError(
             f"error_policy 参数仅支持 'store' / 'raise' / 'ignore'，收到: {error_policy!r}"
         )
+    if not isinstance(num_workers, int):
+        raise TypeError(f"num_workers 必须为 int，收到: {type(num_workers).__name__}")
+    if num_workers < 1:
+        raise ValueError(f"num_workers 必须 >= 1，收到: {num_workers!r}")
+    if total_num is not None and total_num < 0:
+        raise ValueError(f"total_num 必须 >= 0，收到: {total_num!r}")
+    if batch_size is not None and not isinstance(batch_size, int):
+        raise TypeError(f"batch_size 必须为 int 或 None，收到: {type(batch_size).__name__}")
 
     # ---- 2. 物化可迭代对象 -----------------------------------------------
     items, inferred_total = _resolve_iterable(iterable)

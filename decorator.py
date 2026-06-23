@@ -93,6 +93,8 @@ class timer:
     @property
     def elapsed(self) -> float:
         """在上下文管理器内部调用，返回当前已过时间。"""
+        if not hasattr(self, "_start"):
+            raise RuntimeError("timer.elapsed 只能在上下文管理器内部使用")
         return time.perf_counter() - self._start
 
 
@@ -177,6 +179,16 @@ def retry(
     """
     if max_attempts < 1:
         raise ValueError("max_attempts must be >= 1, got %s" % max_attempts)
+    if delay < 0:
+        raise ValueError("delay must be >= 0, got %s" % delay)
+    if backoff < 0:
+        raise ValueError("backoff must be >= 0, got %s" % backoff)
+    if jitter < 0:
+        raise ValueError("jitter must be >= 0, got %s" % jitter)
+    if not isinstance(exceptions, tuple) or not exceptions:
+        raise ValueError("exceptions must be a non-empty tuple of exception classes")
+    if not all(isinstance(exc, type) and issubclass(exc, BaseException) for exc in exceptions):
+        raise TypeError("exceptions must contain only exception classes")
 
     effective_fail_return = None if fail_return is _UNSET else fail_return
 
@@ -186,18 +198,18 @@ def retry(
             base = delay * (backoff ** (attempt - 1))
             return (base + random.uniform(0, jitter)) if jitter > 0 else base
 
-        def _log_retry(attempt: int, exc: BaseException, sleep_time: float):
+        def _log_retry(attempt: int, exc: BaseException, sleep_time: float) -> None:
             logger.debug(
                 f"[retry] '{func.__name__}' attempt {attempt}/{max_attempts} failed: {exc}; "
                 f"retrying in {sleep_time:.3f}s …",
             )
 
-        def _log_exhausted(last_exc: BaseException):
+        def _log_exhausted(last_exc: BaseException) -> None:
             logger.error(
-                f"[retry] '{func.__name__}' exhausted {max_attempts} attempts. Last error: {last_exc}",
+                f"[retry] '{func.__name__}' exhausted {max_attempts} attempts. "
+                f"Last error: {last_exc}",
+                exc_info=True,
             )
-            # 使用 exc_info=True，自动记录当前异常栈，避免手写 traceback.format_exc
-            logger.error("[retry] traceback:", exc_info=True)
 
         # ── 异步版本 ──
         if inspect.iscoroutinefunction(func):

@@ -35,8 +35,8 @@ import warnings
 from datetime import datetime
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
-from typing import Final, NamedTuple
 from types import MappingProxyType
+from typing import Final, NamedTuple
 
 # ---------------------------------------------------------------------------
 # ANSI 颜色
@@ -106,16 +106,20 @@ def _supports_color(stream) -> bool:
 def _relative_path(pathname: str) -> str:
     """尝试将绝对路径转为相对于 cwd 的相对路径，失败则保持原样。
 
-    使用 LRU 缓存避免高频日志场景下重复计算。注意：若运行期间 cwd 发生变化，
-    缓存结果不会失效；通常日志场景下 cwd 不变，影响可忽略。
+    使用 LRU 缓存避免高频日志场景下重复计算；cwd 作为缓存键的一部分，
+    因此运行期间切换工作目录时不会复用旧结果。
     """
-    return _relative_path_cached(pathname)
+    try:
+        cwd = os.getcwd()
+    except Exception:
+        cwd = ""
+    return _relative_path_cached(pathname, cwd)
 
 
 @functools.lru_cache(maxsize=1024)
-def _relative_path_cached(pathname: str) -> str:
+def _relative_path_cached(pathname: str, cwd: str) -> str:
     try:
-        return os.path.relpath(pathname)
+        return os.path.relpath(pathname, start=cwd or None)
     except Exception:
         # Windows 跨盘符会抛 ValueError；cwd 不存在等情形下也兜底
         return pathname
@@ -327,7 +331,6 @@ def init_logger(
                 raise ValueError(
                     f"save_to 必须为 True 或非空文件路径，当前值: {save_to!r}"
                 )
-            logger.info("save log to: %s", log_path)
             if log_path.exists() and log_path.is_dir():
                 raise IsADirectoryError(f"save_to 指向目录而非文件: {log_path}")
 
@@ -341,6 +344,7 @@ def init_logger(
             fh.setFormatter(PlainFormatter())
             setattr(fh, _OWNED_HANDLER_ATTR, True)
             logger.addHandler(fh)
+            logger.info("save log to: %s", log_path)
 
         _LOGGER_CACHE[name] = logger
         _LOGGER_SAVE_TO[name] = save_to

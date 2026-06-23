@@ -25,10 +25,10 @@
 
 ## ✨ 特性亮点
 
-- **统一文件接口**: 支持 `TXT`, `JSON`, `JSONL`, `CSV`, `Parquet` 等多种格式的标准化读写，无需关心底层细节。
+- **统一文件接口**: 支持 `TXT`, `CSV`, `TSV`, `JSON`, `JSONL`, `Parquet`, `Pickle` 等多种格式的标准化读写，无需关心底层细节。
 - **便捷图像处理**: 轻松实现 `PIL.Image`, `Bytes`, `Base64` 之间的相互转换，支持从本地或 URL 加载图像。
-- **无缝日志系统**: 自动兼容 `loguru` 和标准 `logging`，提供统一、简洁的日志记录接口。
-- **高效并行处理**: 简化多线程和多进程任务，内置 `tqdm` 进度条，让并行化更加直观。
+- **实用日志系统**: 基于标准 `logging` 提供彩色控制台日志、可选滚动文件日志、全局等级切换和安全复用。
+- **高效并行处理**: 通过统一的 `apply_parallel` 入口简化多线程和多进程任务，并保证结果顺序与输入一致。
 - **实用装饰器**: 提供 `@timer` (计时), `@timeout` (超时), `@retry` (重试) 等常用装饰器，提升代码健壮性。
 - **轻量文本工具**: 包含文本清洗、`#hashtags#` 提取等常用文本处理功能。
 
@@ -58,7 +58,7 @@
     可以使用以下命令安装所有推荐依赖：
 
     ```bash
-    pip install loguru pandas huggingface_hub pyarrow Pillow requests tqdm
+    pip install pandas huggingface_hub pyarrow Pillow pillow-heif requests tqdm
     ```
 
 ## 🚀 快速开始
@@ -83,57 +83,65 @@ write_file(my_dict, 'config.json', indent=4)
 # 以追加模式写入 TXT 文件
 lines_to_append = ["hello", "world"]
 write_file(lines_to_append, 'log.txt', append=True)
+
+# 追加模式支持 TXT、CSV、TSV、JSONL。
+# 其他后缀传入 append=True 会抛出明确的 ValueError。
 ```
 
 ### 图像处理
 
-`ImageTool` 类封装了所有与图像相关的操作，可以方便地在不同格式间转换。
+`MyImage` 类支持从本地路径、URL、原始 bytes、Base64 字符串或已有 `PIL.Image` 对象加载图像，也提供常用的模块级转换函数。
 
 ```python
-from my_toolkit.image import ImageTool
+from my_toolkit.image import MyImage, img_to_base64, base64_to_img
 
 # 从本地路径或 URL 加载图像
-img_tool = ImageTool(img_path='path/to/your/image.jpg')
-# img_tool = ImageTool(img_path='https://example.com/image.png')
+image = MyImage(path='path/to/your/image.jpg')
+# image = MyImage(url='https://example.com/image.png')
 
 # 获取 PIL.Image 对象
-pil_image = img_tool.img_pil
+pil_image = image.img
 
 # 图像格式转换
-img_bytes = ImageTool.img_to_bytes(pil_image)
-img_base64 = ImageTool.bytes_to_base64(img_bytes)
+img_base64 = img_to_base64(pil_image, fmt='png')
 
 # 从 Base64 恢复图像
-restored_pil_image = ImageTool.base64_to_img(img_base64)
+restored_pil_image = base64_to_img(img_base64)
 
-# 缩放图像并保存
-resized_img = img_tool.resize_img(scale=0.5)
-ImageTool(img_pil=resized_img).save_img('resized_image.png')
+# 转换格式并保存
+image.convert('webp').save('converted.webp')
+
+# 支持读取和输出 Base64 data URL
+data_url = image.base64_with_prefix
+same_image = MyImage(data_url)
 ```
 
 ### 日志记录
 
-统一的 `logger` 实例，无论是否安装 `loguru` 都能正常工作。
+创建可复用的标准库 logger，支持彩色控制台输出和可选滚动文件输出。
 
 ```python
-from my_toolkit.logger import logger, setup_logger
+from my_toolkit.logger import init_logger, set_level
 
-# 配置日志级别和输出文件（可选）
-setup_logger(level="INFO", output_file="app.log")
+log = init_logger("demo", level="INFO", save_to="logs/app.log")
 
-# 使用 logger
-logger.debug("这是一条调试信息。")
-logger.info("欢迎使用 my_toolkit！")
-logger.warning("请注意，这个操作可能耗时较长。")
-logger.error("文件未找到！")
+log.debug("这是一条调试信息。")
+log.info("欢迎使用 my_toolkit！")
+log.warning("请注意，这个操作可能耗时较长。")
+log.error("文件未找到！")
+
+# 切换所有通过 init_logger 创建的 logger
+set_level("WARNING")
+
+# 也可以通过环境变量设置日志等级，例如 LOG_LEVEL=DEBUG
 ```
 
 ### 并行计算
 
-通过 `apply_multi_thread` 和 `apply_multi_process` 轻松执行并行任务。
+通过 `apply_parallel` 轻松执行有序并行任务。I/O 密集型任务使用 `method="thread"`，CPU 密集型任务使用 `method="process"`。
 
 ```python
-from my_toolkit.mp import apply_multi_thread, apply_multi_process
+from my_toolkit.mp import apply_parallel
 import time
 
 def task(item):
@@ -143,14 +151,13 @@ def task(item):
 data = range(20)
 
 # 使用多线程处理 I/O 密集型任务
-print("开始多线程处理...")
-results_thread = apply_multi_thread(data, task, num_workers=4)
-print(f"多线程结果: {results_thread}")
+results_thread = apply_parallel(data, task, method="thread", num_workers=4)
 
 # 使用多进程处理 CPU 密集型任务
-print("\n开始多进程处理...")
-results_process = apply_multi_process(data, task, num_workers=4)
-print(f"多进程结果: {results_process}")
+results_process = apply_parallel(data, task, method="process", num_workers=4)
+
+# error_policy 控制任务失败策略："store"（默认）、"raise" 或 "ignore"
+results = apply_parallel(data, task, error_policy="store")
 ```
 
 ### 实用装饰器
@@ -176,6 +183,8 @@ risky_operation(should_fail=True)
 print("\n--- 第二次调用 (直接成功) ---")
 risky_operation(should_fail=False)
 ```
+
+`@retry` 会在创建装饰器时校验重试参数。设置 `raise_on_failure=True` 可在所有尝试失败后重新抛出最后一次异常。
 
 ### 文本处理
 

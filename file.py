@@ -17,7 +17,11 @@ from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional, Union
 
 import pandas as pd
-from tqdm import tqdm
+
+try:
+    from tqdm import tqdm
+except ImportError:
+    tqdm = None
 
 from .logger import init_logger
 
@@ -49,7 +53,8 @@ PathLike = Union[str, Path]
 
 def _ensure_parent(file_path: Path) -> None:
     """若父目录不存在则自动创建。"""
-    file_path.parent.mkdir(parents=True, exist_ok=True)
+    if file_path.parent != Path("."):
+        file_path.parent.mkdir(parents=True, exist_ok=True)
 
 
 def _to_path(file_path: PathLike) -> Path:
@@ -100,6 +105,18 @@ def _filter_supported_kwargs(
 def _file_is_empty_or_missing(file_path: Path) -> bool:
     """文件不存在或大小为 0 时返回 True。"""
     return not file_path.exists() or file_path.stat().st_size == 0
+
+
+def _needs_append_newline(file_path: Path) -> bool:
+    """追加写入前判断目标文件末尾是否缺少换行。"""
+    if not file_path.exists() or file_path.stat().st_size == 0:
+        return False
+    with open(file_path, "rb") as rf:
+        try:
+            rf.seek(-1, os.SEEK_END)
+            return rf.read(1) not in (b"\n", b"\r")
+        except OSError:
+            return False
 
 
 _CSV_FMTPARAMS = {
@@ -167,16 +184,8 @@ def write_txt(
     # 在打开目标文件前探测末尾换行，避免在同一文件句柄期间再次 open
     # 对 str 和 List[str] 两种分支都适用
     prefix_newline = ""
-    if (
-        append
-        and file_path.exists()
-        and file_path.stat().st_size > 0
-    ):
-        with open(file_path, "rb") as rf:
-            rf.seek(-1, os.SEEK_END)
-            last = rf.read(1)
-        if last not in (b"\n", b"\r"):
-            prefix_newline = "\n"
+    if append and _needs_append_newline(file_path):
+        prefix_newline = "\n"
 
     with open(file_path, mode, encoding=encoding) as f:
         if isinstance(content, list):
@@ -317,7 +326,12 @@ def write_csv(
             not append or _file_is_empty_or_missing(file_path)
         )
         with open(file_path, mode, newline="", encoding=encoding) as f:
-            writer = csv.writer(f, delimiter=sep, **kwargs)
+            supported_kwargs = _filter_supported_kwargs(
+                csv.writer,
+                kwargs,
+                allowed=_CSV_FMTPARAMS,
+            )
+            writer = csv.writer(f, delimiter=sep, **supported_kwargs)
             if write_header:
                 logger.info(f"CSV header: {header}")
                 writer.writerow(header)
@@ -434,7 +448,10 @@ def write_jsonl(
     file_path = _to_path(file_path)
     _ensure_parent(file_path)
     mode = "a" if append else "w"
+    prefix_newline = "\n" if append and data and _needs_append_newline(file_path) else ""
     with open(file_path, mode, encoding=encoding) as f:
+        if prefix_newline:
+            f.write(prefix_newline)
         for item in data:
             f.write(json.dumps(item, ensure_ascii=False) + "\n")
     logger.info(f"Write {len(data)} JSON objects to '{file_path}'")
@@ -507,11 +524,15 @@ def read_parquet(
 
         # 逐文件读取并拼接
         chunks: List[pd.DataFrame] = []
-        for part_path in tqdm(
-            part_paths,
-            desc="Reading Parquet files",
-            leave=False,
-        ):
+        iterator = part_paths
+        if tqdm is not None:
+            iterator = tqdm(
+                part_paths,
+                desc="Reading Parquet files",
+                leave=False,
+            )
+
+        for part_path in iterator:
             try:
                 chunk = pd.read_parquet(part_path, engine=engine)
                 logger.debug(

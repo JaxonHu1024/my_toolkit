@@ -26,10 +26,10 @@ A simple and easy-to-use Python toolkit designed to streamline common operations
 
 ## ✨ Features
 
-- **Unified File Interface**: Standardized read/write support for multiple formats, including `TXT`, `JSON`, `JSONL`, `CSV`, and `Parquet`, without worrying about the underlying details.
+- **Unified File Interface**: Standardized read/write support for multiple formats, including `TXT`, `CSV`, `TSV`, `JSON`, `JSONL`, `Parquet`, and `Pickle`, without worrying about the underlying details.
 - **Convenient Image Processing**: Effortlessly convert between `PIL.Image`, `Bytes`, and `Base64`, with support for loading images from local paths or URLs.
-- **Seamless Logging System**: Automatically compatible with both `loguru` and the standard `logging` library, providing a unified and concise logging interface.
-- **Efficient Parallel Processing**: Simplifies multi-threading and multi-processing tasks, with a built-in `tqdm` progress bar to make parallelization more intuitive.
+- **Practical Logging System**: Provides colored console logs, optional rotating file logs, global level switching, and safe logger reuse with the standard `logging` library.
+- **Efficient Parallel Processing**: Simplifies multi-threading and multi-processing tasks through one ordered `apply_parallel` entry point, with an optional `tqdm` progress bar.
 - **Practical Decorators**: Offers common decorators like `@timer`, `@timeout`, and `@retry` to enhance code robustness.
 - **Lightweight Text Utilities**: Includes common text processing functions for cleaning text, extracting `#hashtags#`, and more.
 
@@ -59,7 +59,7 @@ A simple and easy-to-use Python toolkit designed to streamline common operations
     You can install all recommended dependencies with the following command:
 
     ```bash
-    pip install loguru pandas huggingface_hub pyarrow Pillow requests tqdm
+    pip install pandas huggingface_hub pyarrow Pillow pillow-heif requests tqdm
     ```
 
 ## 🚀 Quickstart
@@ -84,57 +84,65 @@ write_file(my_dict, 'config.json', indent=4)
 # Append lines to a TXT file
 lines_to_append = ["hello", "world"]
 write_file(lines_to_append, 'log.txt', append=True)
+
+# Append is supported for TXT, CSV, TSV, and JSONL.
+# Unsupported suffixes raise a clear ValueError.
 ```
 
 ### Image Processing
 
-The `ImageTool` class encapsulates all image-related operations, making it easy to convert between different formats.
+The `MyImage` class accepts local paths, URLs, raw bytes, Base64 strings, or existing `PIL.Image` objects. Module-level helpers are also available for common conversions.
 
 ```python
-from my_toolkit.image import ImageTool
+from my_toolkit.image import MyImage, img_to_base64, base64_to_img
 
 # Load an image from a local path or URL
-img_tool = ImageTool(img_path='path/to/your/image.jpg')
-# img_tool = ImageTool(img_path='https://example.com/image.png')
+image = MyImage(path='path/to/your/image.jpg')
+# image = MyImage(url='https://example.com/image.png')
 
 # Get the PIL.Image object
-pil_image = img_tool.img_pil
+pil_image = image.img
 
 # Convert between image formats
-img_bytes = ImageTool.img_to_bytes(pil_image)
-img_base64 = ImageTool.bytes_to_base64(img_bytes)
+img_base64 = img_to_base64(pil_image, fmt='png')
 
 # Restore an image from a Base64 string
-restored_pil_image = ImageTool.base64_to_img(img_base64)
+restored_pil_image = base64_to_img(img_base64)
 
-# Resize and save an image
-resized_img = img_tool.resize_img(scale=0.5)
-ImageTool(img_pil=resized_img).save_img('resized_image.png')
+# Convert format and save
+image.convert('webp').save('converted.webp')
+
+# Base64 data URLs are supported as input and output
+data_url = image.base64_with_prefix
+same_image = MyImage(data_url)
 ```
 
 ### Logging
 
-A unified `logger` instance that works correctly whether `loguru` is installed or not.
+Create reusable standard-library loggers with colored console output and optional rotating file output.
 
 ```python
-from my_toolkit.logger import logger, setup_logger
+from my_toolkit.logger import init_logger, set_level
 
-# Configure the log level and output file (optional)
-setup_logger(level="INFO", output_file="app.log")
+log = init_logger("demo", level="INFO", save_to="logs/app.log")
 
-# Use the logger
-logger.debug("This is a debug message.")
-logger.info("Welcome to my_toolkit!")
-logger.warning("Please note, this operation may take a long time.")
-logger.error("File not found!")
+log.debug("This is a debug message.")
+log.info("Welcome to my_toolkit!")
+log.warning("Please note, this operation may take a long time.")
+log.error("File not found!")
+
+# Switch all loggers created by init_logger
+set_level("WARNING")
+
+# LOG_LEVEL can also be set in the environment, for example LOG_LEVEL=DEBUG
 ```
 
 ### Parallel Processing
 
-Easily execute parallel tasks with `apply_multi_thread` and `apply_multi_process`.
+Easily execute ordered parallel tasks with `apply_parallel`. Use `method="thread"` for I/O-bound work and `method="process"` for CPU-bound work.
 
 ```python
-from my_toolkit.mp import apply_multi_thread, apply_multi_process
+from my_toolkit.mp import apply_parallel
 import time
 
 def task(item):
@@ -144,14 +152,13 @@ def task(item):
 data = range(20)
 
 # Use multi-threading for I/O-bound tasks
-print("Starting multi-threading...")
-results_thread = apply_multi_thread(data, task, num_workers=4)
-print(f"Multi-threading results: {results_thread}")
+results_thread = apply_parallel(data, task, method="thread", num_workers=4)
 
 # Use multi-processing for CPU-bound tasks
-print("\nStarting multi-processing...")
-results_process = apply_multi_process(data, task, num_workers=4)
-print(f"Multi-processing results: {results_process}")
+results_process = apply_parallel(data, task, method="process", num_workers=4)
+
+# error_policy controls task failures: "store" (default), "raise", or "ignore"
+results = apply_parallel(data, task, error_policy="store")
 ```
 
 ### Useful Decorators
@@ -177,6 +184,8 @@ risky_operation(should_fail=True)
 print("\n--- Second call (will succeed directly) ---")
 risky_operation(should_fail=False)
 ```
+
+`@retry` validates retry parameters up front. Set `raise_on_failure=True` to re-raise the last exception after all attempts are exhausted.
 
 ### Text Processing
 

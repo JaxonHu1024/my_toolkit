@@ -37,12 +37,15 @@ import re
 from pathlib import Path
 from typing import Optional, Union
 
-import requests
-
 from PIL import Image, ExifTags
 
 from .logger import init_logger
 logger = init_logger(name=__name__)
+
+try:
+    import requests
+except ImportError:
+    requests = None
 
 try:
     import pillow_heif
@@ -322,34 +325,53 @@ def download_bytes_from_url(
     # URL 合法性校验
     if not url or not url.strip().startswith(("http://", "https://")):
         raise ValueError(f"URL 必须以 http:// 或 https:// 开头，收到: {url!r}")
+    if requests is None:
+        raise ImageDownloadError(
+            "requests 未安装，无法从 URL 下载图像。请安装: pip install requests"
+        )
+    if timeout <= 0:
+        raise ValueError(f"timeout 必须为正数，收到: {timeout!r}")
+    if max_size <= 0:
+        raise ValueError(f"max_size 必须为正数，收到: {max_size!r}")
 
     try:
-        response = requests.get(url, timeout=timeout, stream=True)
-        response.raise_for_status()
+        with requests.get(url, timeout=timeout, stream=True) as response:
+            response.raise_for_status()
 
-        # 检查 Content-Length（如果服务端提供）
-        content_length = response.headers.get("Content-Length")
-        if content_length and int(content_length) > max_size:
-            raise ImageDownloadError(
-                f"文件大小: {readable_bytes_size(int(content_length))}, 超过限制: {readable_bytes_size(max_size)}"
-            )
+            # 检查 Content-Length（如果服务端提供）
+            content_length = response.headers.get("Content-Length")
+            if content_length:
+                try:
+                    content_length_int = int(content_length)
+                except ValueError:
+                    logger.debug("忽略非法 Content-Length: %r", content_length)
+                else:
+                    if content_length_int > max_size:
+                        raise ImageDownloadError(
+                            f"文件大小: {readable_bytes_size(content_length_int)}, "
+                            f"超过限制: {readable_bytes_size(max_size)}"
+                        )
 
-        # 流式读取，防止大文件撑爆内存
-        chunks: list[bytes] = []
-        downloaded = 0
-        for chunk in response.iter_content(chunk_size=8192):
-            if not chunk:
-                continue
-            downloaded += len(chunk)
-            if downloaded > max_size:
+            # 流式读取，防止大文件撑爆内存
+            chunks: list[bytes] = []
+            downloaded = 0
+            for chunk in response.iter_content(chunk_size=8192):
+                if not chunk:
+                    continue
+                downloaded += len(chunk)
+                if downloaded > max_size:
+                    raise ImageDownloadError(
+                        f"下载数据量: {readable_bytes_size(downloaded)}, 超过限制: {readable_bytes_size(max_size)}"
+                    )
+                chunks.append(chunk)
+
+            data = b"".join(chunks)
+            if not data:
                 raise ImageDownloadError(
-                    f"下载数据量: {readable_bytes_size(downloaded)}, 超过限制: {readable_bytes_size(max_size)}"
+                    f"下载结果为空: {url}"
                 )
-            chunks.append(chunk)
-
-        data = b"".join(chunks)
-        logger.debug("下载完成，数据大小: %s", readable_bytes_size(len(data)))
-        return data
+            logger.debug("下载完成，数据大小: %s", readable_bytes_size(len(data)))
+            return data
 
     except requests.Timeout as exc:
         raise ImageDownloadError(f"下载超时 (timeout={timeout}s): {url}") from exc
@@ -403,6 +425,8 @@ def img_to_bytes(img: Image.Image, fmt: Optional[str] = None) -> bytes:
         fmt = _normalize_format(img.format) or _DEFAULT_FORMAT
     else:
         fmt = _normalize_format(fmt) or _DEFAULT_FORMAT
+    if fmt not in SUPPORTED_FORMATS:
+        raise ImageFormatError(f"不支持的图像格式: {fmt!r}")
 
     save_fmt = _pillow_save_format(fmt)
     buf = io.BytesIO()
@@ -434,13 +458,14 @@ def base64_to_bytes(data: str) -> bytes:
         raise ValueError("base64 字符串不能为空")
 
     _, pure_b64 = _strip_data_url_prefix(data)
+    pure_b64 = "".join(pure_b64.split())
 
     try:
         decoded = base64.b64decode(pure_b64, validate=True)
     except Exception as exc:
         raise ValueError(f"base64 解码失败: {exc}") from exc
 
-    logger.debug("解码后大小: %d KB", len(decoded) / 1024)
+    logger.debug("解码后大小: %s", readable_bytes_size(len(decoded)))
     return decoded
 
 
@@ -454,6 +479,9 @@ def bytes_to_base64(data: bytes, *, with_data_prefix: bool = False) -> str:
     Returns:
         base64 编码的字符串。
     """
+    if not data:
+        raise ValueError("bytes 数据不能为空")
+
     encoded = base64.b64encode(data).decode("ascii")
 
     if with_data_prefix:
@@ -492,6 +520,13 @@ def img_to_base64(
     """
     raw_bytes = img_to_bytes(img, fmt=fmt)
     return bytes_to_base64(raw_bytes, with_data_prefix=with_data_prefix)
+
+
+def _clone_loaded_image(img: Image.Image) -> Image.Image:
+    """复制并完全加载 Pillow Image，避免依赖外部文件句柄或可变对象。"""
+    cloned = img.copy()
+    cloned.load()
+    return cloned
 
 
 # ---------------------------------------------------------------------------
@@ -602,26 +637,32 @@ class MyImage:
                 raise FileNotFoundError(f"文件不存在: {path}")
             self._img = Image.open(path)
             self._img.load()  # 读入内存，释放文件句柄
+            self._format = _normalize_format(self._img.format)
 
         elif url is not None:
             raw_bytes = download_bytes_from_url(url)
             self._img = bytes_to_img(raw_bytes)
+            self._bytes = raw_bytes
+            self._format = _guess_format_from_bytes(raw_bytes)
 
         elif byte is not None:
             self._img = bytes_to_img(byte)
+            self._bytes = byte
+            self._format = _guess_format_from_bytes(byte)
 
         elif base64 is not None:
+            prefix_fmt, pure_b64 = _strip_data_url_prefix(base64)
             raw_bytes = base64_to_bytes(base64)
             self._img = bytes_to_img(raw_bytes)
+            self._bytes = raw_bytes
+            self._base64 = pure_b64
+            self._format = prefix_fmt or _guess_format_from_bytes(raw_bytes)
 
         elif img is not None:
-            self._img = img
+            self._img = _clone_loaded_image(img)
+            self._format = _normalize_format(img.format)
 
-        # ------ 统一为 RGB 格式的 JPEG 作为标准格式 ------
-        self._img = _ensure_rgb_for_jpeg(self._img)
-        if self._img.mode != "RGB":
-            self._img = self._img.convert("RGB")
-        self._format = _DEFAULT_FORMAT
+        self._format = self._format or _DEFAULT_FORMAT
 
     # ---- 便捷属性 ----
 
@@ -731,9 +772,12 @@ class MyImage:
             fmt = _guess_format_from_suffix(str(path)) or self._format
         else:
             fmt = _normalize_format(fmt) or self._format
+        if fmt not in SUPPORTED_FORMATS:
+            raise ImageFormatError(f"不支持的图像格式: {fmt!r}")
 
         # 自动创建父目录
-        path.parent.mkdir(parents=True, exist_ok=True)
+        if path.parent != Path("."):
+            path.parent.mkdir(parents=True, exist_ok=True)
 
         pil_fmt = _pillow_save_format(fmt)
         save_img = _ensure_rgb_for_jpeg(self._img) if fmt == "jpeg" else self._img
@@ -741,6 +785,13 @@ class MyImage:
         save_img.save(str(path), format=pil_fmt)
         logger.debug(f"图像已保存至: {path} (格式={fmt})")
         return path
+
+    def convert(self, fmt: str) -> MyImage:
+        """返回一个以目标格式编码的新 ``MyImage`` 实例。"""
+        fmt = _normalize_format(fmt) or _DEFAULT_FORMAT
+        if fmt not in SUPPORTED_FORMATS:
+            raise ImageFormatError(f"不支持的图像格式: {fmt!r}")
+        return MyImage(byte=img_to_bytes(self._img, fmt=fmt))
 
     # ---- 资源管理 ----
 
